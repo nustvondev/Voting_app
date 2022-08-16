@@ -13,6 +13,7 @@
 * [Tool và Framework được dùng trong dự án](#link-của-một-số-tools-và-frameworks-được-dùng-trong-dự-án)
 * [Chạy ứng dụng](#chạy-ứng-dụng)
 * [01 - Tổng Quan về "Architecture"](#01---tổng-quan-về-architecture)
+* [02 - Thiết lập Rest API](#02---thiết-lập-rest-api)
 
 
 <br />
@@ -101,5 +102,189 @@ Hình ảnh bên dưới cung cấp tổng quan về các công cụ, ngôn ng�
 
 <br />
 
+## 02 - Thiết lập Rest API
+
+### Imports 
+
+Cấu hình biến môi trường cho CORS. Ở đây sẽ tiến hành hard-code cổng port của `CORS` . Tiến hành cấu hình file [.env](../server/.env).
+
+```toml
+PORT=3000
+CLIENT_PORT=8080
+REDIS_HOST=localhost
+```
+
+Thay vì truyền đối tượng CORS, ta ta có thể truy cập vào các đối tượng con có origin và chỉ định các cổng của client đến từ `ConfigService`. Sau đó tiến hành cấu hình động CORS cho `app`.
+
+```ts
+  const configService = app.get(ConfigService);
+  const port = parseInt(configService.get('PORT'));
+  const clientPort = parseInt(configService.get('CLIENT_PORT'));
+  app.enableCors({
+    origin: [
+      `http://localhost:${clientPort}`,
+      new RegExp(`/^http:\/\/192\.168\.1\.([1-9]|[1-9]\d):${clientPort}$/`),
+    ],
+  });
+  await app.listen(port);
+```
+
+### Tạo Polls Module
+
+Tạo thư mục `polls` chứa chức năng của ứng dụng. Trong thư mục `polls` tiến hành tạo file [polls.module.ts](../server/src/polls/polls.module.ts).
+
+Import `Module, ConfigModule` để decorator từ `@nestjs`. 
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+```
+
+Sau đó tiến hành tạo lớp `PollsModule`.
 
 
+```ts
+@Module({
+  imports: [ConfigModule],
+  controllers: [],
+  providers: [],
+})
+export class PollsModule {}
+```
+
+Sau khi có Polls module, chúng ta cần ứng dụng có thể biết nó. Vì thế, chúng ta sẽ tiến hành đăng kí import module này vào file [app.module.ts](../server/src/app.module.ts) .
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { PollsModule } from './polls/polls.module';
+@Module({
+  imports: [ConfigModule.forRoot(), PollsModule],
+  controllers: [],
+  providers: [],
+})
+export class AppModule {}
+```
+
+### Thêm Polls Controller với Endpoints
+
+Tạo file [polls.controller.ts](../server/src/polls/polls.controller.ts). Như các lớp mẫu, ta tiến hành tạo lớp `polls` controller. Chúng ta decorate controller này với Nest's built-in `@Controller` decorator. 
+
+```ts
+import { Controller, Logger, Post, Body } from '@nestjs/common';
+@Controller('polls')
+export class PollsController {
+}
+```
+
+Sau đó tiến hành định nghĩa các route cho create, join, rejoin trong việc bỏ phiếu nhứ sau.
+
+```ts
+@Controller('polls')
+export class PollsController {
+  @Post()
+  async create() {
+    Logger.log('Create!');
+  }
+  @Post('/join')
+  async join() {
+    Logger.log('Join!');
+  }
+  @Post('/rejoin')
+  async rejoin() {
+    Logger.log('Rejoin!');
+  }
+}
+```
+
+*Sau đó tiến hành test với Postman lần lượt post request đến `localhost:8080/polls`, `localhost:8080/polls/join`, `localhost:8080/polls/rejoin*
+
+### Định nghĩa Request Body cho Endpoints
+
+Tạo file [dtos.ts](../server/src/polls/dtos.ts) và decorator như sau.
+
+```ts
+import { Length, IsInt, IsString, Min, Max } from 'class-validator';
+export class CreatePollDto {
+  @IsString()
+  @Length(1, 100)
+  topic: string;
+  @IsInt()
+  @Min(1)
+  @Max(5)
+  votesPerVoter: number;
+  @IsString()
+  @Length(1, 25)
+  name: string;
+}
+export class JoinPollDto {
+  @IsString()
+  @Length(6, 6)
+  pollID: string;
+  @IsString()
+  @Length(1, 18)
+  name: string;
+}
+```
+
+Quay về polls controller điều chỉnh lại các lớp.
+
+```ts
+@Controller('polls')
+export class PollsController {
+  @Post()
+  async create(@Body() createPollDto: CreatePollDto) {
+    Logger.log('Create!');
+    return createPollDto;
+  }
+  @Post('/join')
+  async join(@Body() joinPollDto: JoinPollDto) {
+    Logger.log('Join!');
+    return joinPollDto;
+  }
+  @Post('/rejoin')
+  async rejoin() {
+    Logger.log('Rejoin!');
+    return {
+      message: 'rejoin endpoint',
+    };
+  }
+}
+```
+
+Sau đó tiến hành import `PollsController` trong file [polls.module.ts](../server/src/polls/polls.module.ts).
+
+```ts
+import { PollsController } from './polls.controller';
+@Module({
+  imports: [ConfigModule],
+  controllers: [PollsController],
+  providers: [],
+})
+export class PollsModule {}
+```
+
+Sau đó tiến hành test các endpoints. Ta nhận về các kết quả như sau:
+
+
+
+*Tạo câu hỏi.*
+
+![Create Polls](./resources//createpolls.jpg)
+
+*Người chơi tham gia.*
+
+![Join Player Polls](./resources//joinpolls.jpg)
+
+*Người chơi tham gia lại.*
+
+![Rejoin Polls](./resources//rejoinpolls.jpg)
+
+
+**[⬆ Quay về Mục Lục](#mục-lục)**
+
+<br />
+
+---
+
+<br />
