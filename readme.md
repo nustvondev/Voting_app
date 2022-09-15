@@ -14,6 +14,8 @@
 * [Chạy ứng dụng](#chạy-ứng-dụng)
 * [01 - Tổng Quan về "Architecture"](#01---tổng-quan-về-architecture)
 * [02 - Thiết lập Rest API](#02---thiết-lập-rest-api)
+* [03 - Thiết lập Polls Service](#03---thiết-lập-polls-service)
+* [04 - Thiết lập Redis Module](#04---thiết-lập-redis-module)
 
 
 <br />
@@ -283,6 +285,333 @@ Sau đó tiến hành test các endpoints. Ta nhận về các kết quả như 
 
 **[⬆ Quay về Mục Lục](#mục-lục)**
 
+<br />
+
+---
+
+<br />
+
+
+## 03 - Thiết lập Polls Service
+
+Chúng ta có thể thiết kế các Rest Endpoint với [NestJS's Controller](https://docs.nestjs.com/controllers). Định nghĩa của các request body đến là "đối tượng truyền dữ liệu(Data transfer object. DTO)" và validate bằng cho các trường dữ liệu request body bằng cách sử dụng thư viện `class-validator` được thiết kế.
+
+
+### Ý tưởng
+
+Sau khi lấy dữ liệu với 3 endpoints xử lý thì data sẽ được chuyển đến DB. Điều này có khả năng khến dịch vụ có thể dính `Injectable` hoặc các provider. Giải pháp đây là tạo hàm `createPoll` sẽ xử lý các bước được nêu trong sơ đồ. Logic đây rất nhiều thứ phức tạp. Việc tương tác với kho lưu trữ để duy trì  và truy xuất dữ liệu trong Redis, cũng như làm việc với các dịch vụ khác ("JWT").
+
+![Service - Create Poll Diagram](./resources//PollsServiceDiagram.png)
+
+### Tạo lớp Polls Service
+
+Tạo file [polls.service.ts](../server/src/polls/polls.service.ts), file định nghĩa các loại [types.ts](../server/src/polls/types.ts), tệp này sẽ rất tốt để lưu trữ các loại cho các chức năng khác nhau trong các dịch vụ và kho lưu trữ.
+
+Trong file [types.ts](../server/src/polls/types.ts), định nghĩa các tham số cho 3 phương thức dịch vụ.
+
+```ts
+export type CreatePollFields = {
+  topic: string;
+  votesPerVoter: number;
+  name: string;
+};
+export type JoinPollFields = {
+  pollID: string;
+  name: string;
+};
+export type RejoinPollFields = {
+  pollID: string;
+  userID: string;
+  name: string;
+};
+```
+
+Tạo một lớp chứa 3 phương thức [polls.service.ts](../server/src/polls/polls.service.ts)!
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { CreatePollFields, JoinPollFields, RejoinPollFields } from './types';
+@Injectable()
+export class PollsService {
+  async createPoll(fields: CreatePollFields) {}
+  async joinPoll(fields: JoinPollFields) {}
+  async rejoinPoll(fields: RejoinPollFields) {}
+}
+```
+
+### Tạo lớp chứa ID trong Polls Service
+
+Trong thư mục `src, tạo file [ids.ts](../server/src/ids.ts). Dùng package có thể tạo ID với thư viện gọi `nanoid`. Đây là package được cài trong thư mục server.
+
+```ts
+import { customAlphabet, nanoid } from 'nanoid';
+
+export const createPollID = customAlphabet(
+  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+  6,
+);
+
+export const createUserID = () => nanoid();
+export const createNominationID = () => nanoid(8);
+```
+
+Hàm `createPollID` sử dụng bản chữ cái alphabet. Tạo một ID 6 ký tự cho các cuộc thăm dò chỉ bằng chữ in hoa và số. Điều này là do chúng tôi muốn tạo một ID cho trò chơi để có thể dễ dàng chia sẻ hoặc thông qua giữa bạn bè. Với độ  dài 21 kí tự
+
+### Thêm phương thức logic
+
+Setup file [polls.service.ts](../server/src/polls/polls.service.ts) lại như sau:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { createPollID, createUserID } from 'src/ids';
+import { CreatePollFields, JoinPollFields, RejoinPollFields } from './types';
+@Injectable()
+export class PollsService {
+  async createPoll(fields: CreatePollFields) {
+    const pollID = createPollID();
+    const userID = createUserID();
+    return {
+      ...fields,
+      userID,
+      pollID,
+    };
+  }
+  async joinPoll(fields: JoinPollFields) {
+    const userID = createUserID();
+    return {
+      ...fields,
+      userID,
+    };
+  }
+  async rejoinPoll(fields: RejoinPollFields) {
+    return fields;
+  }
+}
+```
+
+Trong `createPoll` chúng ta tạo `gameId` và `userId`. Trong `joinPoll` tạo `userId`, client sẽ cung cấp `pollId` khi có người ham gia.
+
+### Truy cập Polls Service của Polls Controller
+
+Dịch vụ thăm dò ý kiến ​​của chúng ta có thể truy cập được đối với các lớp khác bên trong module. Chúng ta thực hiện việc này bằng cách decorator các `Module` trong [polls.module.ts](../server/src/polls/polls.module.ts).
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { PollsController } from './polls.controller';
+import { PollsService } from './polls.service';
+@Module({
+  imports: [ConfigModule],
+  controllers: [PollsController],
+  providers: [PollsService],
+})
+export class PollsModule {}
+```
+
+Đồng thời chỉnh sửa constructor trong [polls.controller.ts](../server/src/polls/polls.controller.ts).
+
+```ts
+import { PollsService } from './polls.service';
+@Controller('polls')
+export class PollsController {
+  constructor(private pollsService: PollsService) {}
+  
+  // ...
+}
+```
+
+Sau đó update các method quản lí service. Loại bỏ đi `Loger` và trả về kết quả tương ứng của mỗi method.
+
+```ts
+  @Post()
+  async create(@Body() createPollDto: CreatePollDto) {
+    const result = await this.pollsService.createPoll(createPollDto);
+    return result;
+  }
+  @Post('/join')
+  async join(@Body() joinPollDto: JoinPollDto) {
+    const result = await this.pollsService.joinPoll(joinPollDto);
+    return result;
+  }
+  @Post('/rejoin')
+  async rejoin() {
+    const result = await this.pollsService.rejoinPoll({
+      name: 'From here',
+            pollID: 'from token',
+            userID: 'UserID token',
+    });
+    return result;
+  }
+```
+
+### Testing với Postman
+
+Tại thư mục root chạy app bằng lệnh `npm run start`.
+
+
+**[⬆ Quay về Mục Lục](#mục-lục)**
+<br />
+
+---
+
+<br />
+
+
+## 04 - Thiết lập Redis Module
+
+Tạo file [redis.module.ts](../server/src/redis.module.ts) trong root của thư mục server và thiết lập như cấu trúc sau.
+
+```ts
+import { DynamicModule } from '@nestjs/common';
+import { Module } from '@nestjs/common';
+import IORedis from 'ioredis';
+@Module({})
+export class RedisModule {
+  static async registerAsync(): Promise<DynamicModule> {
+    return {
+      module: RedisModule,
+      imports: [],
+      providers: [],
+      exports: [],
+    };
+  }
+}
+```
+Cấu hình cho module này, loại phù hợp với những gì chúng ta đã thấy với module JWT.
+
+```ts
+import { DynamicModule, FactoryProvider, ModuleMetadata } from '@nestjs/common';
+import { Module } from '@nestjs/common';
+import IORedis, { Redis, RedisOptions } from 'ioredis';
+type RedisModuleOptions = {
+  connectionOptions: RedisOptions;
+  onClientReady?: (client: Redis) => void;
+};
+type RedisAsyncModuleOptions = {
+  useFactory: (
+    ...args: any[]
+  ) => Promise<RedisModuleOptions> | RedisModuleOptions;
+} & Pick<ModuleMetadata, 'imports'> &
+  Pick<FactoryProvider, 'inject'>;
+@Module({})
+export class RedisModule {
+  static async registerAsync({
+    useFactory,
+    imports,
+    inject,
+  }: RedisAsyncModuleOptions): Promise<DynamicModule> {
+```
+
+Kiểu tiên chúng tôi tạo là `RedisModuleOptions`. Điều này sẽ chứa các tùy chọn khởi tạo `RedisClient`. Định nghĩa kiểu này do `IORedis` cung cấp. Tùy chọn thứ hai là một chức năng mà chúng ta có thể tùy chọn gọi khi máy khách đã sẵn sàng. Tôi thực hiện tùy chọn này với một dấu chấm hỏi,`?`. Đây là một hàm chúng ta có thể sử dụng để ghi nhật ký mà Redis đã sẵn sàng, hoặc có lẽ có một số logic phụ thuộc Redis khác mà chúng ta cần.
+
+### Định nghĩa registerAsync
+
+Xem `DynamicModule` trả về kết quả.
+
+```ts
+return {
+      module: RedisModule,
+      imports: imports,
+      providers: [],
+      exports: [],
+    };
+```
+Định nghĩa và trả về mảng `providers`.
+
+```ts
+export const IORedisKey = 'IORedis';
+    const redisProvider = {
+      provide: IORedisKey,
+      useFactory: async (...args) => {
+        const { connectionOptions, onClientReady } = await useFactory(...args);
+
+        const client = await new IORedis(connectionOptions);
+
+        onClientReady(client);
+
+        return client;
+      },
+      inject,
+    };
+
+    return {
+      module: RedisModule,
+      imports,
+      providers: [redisProvider],
+      exports: [redisProvider],
+    };
+```
+
+### Tạo Module
+
+Config động trong module. 
+
+Import các module hỗ trợ cho RedisModule.
+
+```ts
+import { Logger } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { RedisModule } from './redis.module';
+```
+
+Log kết quả kết nối trong module.
+
+```ts
+export const redisModule = RedisModule.registerAsync({
+  imports: [ConfigModule],
+  useFactory: async (configService: ConfigService) => {
+    const logger = new Logger('RedisModule');
+
+    return {
+      connectionOptions: {
+        host: configService.get('REDIS_HOST'),
+        port: configService.get('REDIS_PORT'),
+      },
+      onClientReady: (client) => {
+        logger.log('Redis client ready');
+
+        client.on('error', (err) => {
+          logger.error('Redis Client Error: ', err);
+        });
+
+        client.on('connect', () => {
+          logger.log(
+            `Connected to redis on ${client.options.host}:${client.options.port}`,
+          );
+        });
+      },
+    };
+  },
+  inject: [ConfigService],
+});
+```
+### Thiết lập Module trong Polls Module và test
+
+Cấu hình lại file [PollsModule](../server/src/polls/polls.module.ts).
+
+```ts
+import { redisModule } from 'src/modules.config';
+@Module({
+  imports: [ConfigModule, redisModule],
+  controllers: [PollsController],
+  providers: [PollsService],
+})
+export class PollsModule {}
+```
+
+Test app bằng cách trong thư mục root chạy `npm run start`. Nhớ settup file [docker-compose.yml](../docker-compose.yml) trong thư mục root.
+
+Khi chạy ta nhận kết quả như sau:
+
+```sh
+LOG [RedisModule] Redis client ready
+LOG [RedisModule] Connected to redis on localhost:6379
+```
+
+![Log result Redis](./resources//setupRedis.jpg)
+
+
+**[⬆ Quay về Mục Lục](#mục-lục)**
 <br />
 
 ---
