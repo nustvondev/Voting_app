@@ -16,6 +16,9 @@
 * [02 - Thiết lập Rest API](#02---thiết-lập-rest-api)
 * [03 - Thiết lập Polls Service](#03---thiết-lập-polls-service)
 * [04 - Thiết lập Redis Module](#04---thiết-lập-redis-module)
+* [05 - Thiết lập Polls Repository](#05---thiết-lập-polls-repository)
+* [06 - Config JWT vào dự án](#06---config-jwt-vào-dự-án)
+
 
 
 <br />
@@ -612,6 +615,472 @@ LOG [RedisModule] Connected to redis on localhost:6379
 
 
 **[⬆ Quay về Mục Lục](#mục-lục)**
+<br />
+
+---
+
+<br />
+
+## 05 - Thiết lập Polls Repository
+
+Như mô tả như sơ đồ bên dưới, chúng ta sẽ làm việc với `Polls Module`. Bằng việc sếp các khối `PollsRepository` chúng ta có thể lưu trữ, sắp xếp,truy xuất đến kho lưu trữ dữ diệu Redis.
+
+![Diagram](./resources//PollsRepositoryDiagram.png)
+
+### Tạo và inject lớp PollsRepository
+
+Decorator lại file [polls.repository.ts](../server/src/polls/polls.repository.ts). 
+
+```ts
+import { Inject } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Redis } from 'ioredis';
+import { IORedisKey } from 'src/redis.module';
+@Injectable()
+export class PollsRepository {
+  private readonly ttl: string;
+  private readonly logger = new Logger(PollsRepository.name);
+  constructor(
+    configService: ConfigService,
+    @Inject(IORedisKey) private readonly redisClient: Redis,
+  ) {
+    this.ttl = configService.get('POLL_DURATION');
+  }
+}
+```
+
+Tạo một lớp private `ttl`. Trong constructor, truy cập thông qua `configService` đã được cung cấp trong lớp [PollsModule](../server/src/polls/polls.module.ts) và gọi biến này đã được set trong file [.env file](../server/.env) với 7200s xấp xỉ gần 2 tiếng.
+
+Khởi tạo phương thức để Log ra màn hình để debug, nó thường dùng trong môi trường production.
+
+Config lại `PollsService`.
+
+
+```ts
+import { PollsRepository } from './polls.repository';
+import { PollsService } from './polls.service';
+@Module({
+  imports: [ConfigModule, redisModule],
+  controllers: [PollsController],
+  providers: [PollsService, PollsRepository],
+})
+export class PollsModule {}
+```
+
+### Định nghĩa Kiểu
+
+Tạo folder `shared` cùng cấp với `client` và `server`.
+
+Set file [package.json](../package.json) tại thư mục root như sau:
+
+```json /package.json
+  "workspaces": [
+    "client",
+    "server",
+    "shared"
+  ],
+```
+
+Trong thư mục `shared` set [shared/package.json](../shared/package.json) như sau:
+
+```json /shared/package.json
+{
+  "name": "shared",
+  "version": "0.0.0",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/react": "^17.0.39",
+    "@types/react-dom": "^17.0.13",
+    "socket.io-client": "^4.4.1",
+    "typescript": "^4.5.3"
+  }
+}
+```
+
+Config [tsconfig.json](../shared/tsconfig.json) :
+
+
+```ts
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],
+    "allowJs": false,
+    "skipLibCheck": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "strictNullChecks": true,
+    "moduleResolution": "Node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react",
+  },
+  "include": ["."]
+}
+```
+
+Sau đó run `npm intsall` để cài đặt toàn bộ môi trường.
+
+```sh
+npm install
+```
+
+
+Config [poll-types.ts](../shared/poll-types.ts) như sau:
+
+
+```ts
+export interface Participants {
+  [participantID: string]: string;
+}
+export interface Poll {
+  id: string;
+  topic: string;
+  votesPerVoter: number;
+  participants: Participants;
+  adminID: string;
+  // nominations: Nominations;
+  // rankings: Rankings;
+  // results: Results;
+  // hasStarted: boolean;
+}
+```
+
+Export kiểu trong file `index.ts` trong thư mục `shared`.
+
+```ts index.ts
+export * from './poll-types';
+```
+
+Set [types.ts](../server/src/polls/types.ts):
+
+```ts types.ts
+export type CreatePollData = {
+  pollID: string;
+  topic: string;
+  votesPerVoter: number;
+  userID: string;
+};
+export type AddParticipantData = {
+  pollID: string;
+  userID: string;
+  name: string;
+};
+```
+
+### Polls Repository Methods
+
+Config `pollService` như sau :
+
+```ts
+// ...omitted content
+import { Poll } from 'shared';
+import { CreatePollData } from './types';
+import { InternalServerErrorException } from '@nestjs/common/exceptions';
+// ...omitted content
+ async createPoll({
+    votesPerVoter,
+    topic,
+    pollID,
+    userID,
+  }: CreatePollData): Promise<Poll> {
+    const initialPoll = {
+      id: pollID,
+      topic,
+      votesPerVoter,
+      participants: {},
+      adminID: userID,
+    };
+    this.logger.log(
+      `Creating new poll: ${JSON.stringify(initialPoll, null, 2)} with TTL ${
+        this.ttl
+      }`,
+    );
+    const key = `polls:${pollID}`;
+    try {
+      await this.redisClient
+        .multi([
+          ['send_command', 'JSON.SET', key, '.', JSON.stringify(initialPoll)],
+          ['expire', key, this.ttl],
+        ])
+        .exec();
+      return initialPoll;
+    } catch (e) {
+      this.logger.error(
+        `Failed to add poll ${JSON.stringify(initialPoll)}\n${e}`,
+      );
+      throw new InternalServerErrorException();
+    }
+  }
+```
+
+Đầu tiên ta trích xuất dữ liệu sẽ được truyền khi hàm được gọi. Chúng ta set `pollID`, `toppic`, `admin`, `votesPerVoter` cho việc khởi tạo câu hỏi ban đầu. Trong trường hợp admin sẽ giữ vai trò người tạo câu hỏi. Vì thế không thể cho đối tượng người tham gia vào action này. Người dùng chỉ có thể dùng mã để connect với socket web.
+
+Sau đó log ra màn hình.
+
+Cuối cùng, cho đối tượng truyền vào Redis kiểu JSON.
+
+Nếu thành công, trả về `initialPoll`, n=ngược lại sẽ ném ngoại lệ là một exception trả về status `500`.
+
+Thêm method `getPoll` như sau:
+
+```ts
+  async getPoll(pollID: string): Promise<Poll> {
+    this.logger.log(`Attempting to get poll with: ${pollID}`);
+    const key = `polls:${pollID}`;
+    try {
+      const currentPoll = await this.redisClient.send_command(
+        'JSON.GET',
+        key,
+        '.',
+      );
+      this.logger.verbose(currentPoll);
+      // if (currentPoll?.hasStarted) {
+      //   throw new BadRequestException('The poll has already started');
+      // }
+      return JSON.parse(currentPoll);
+    } catch (e) {
+      this.logger.error(`Failed to get pollID ${pollID}`);
+      throw e;
+    }
+  }
+```
+
+Phương thức dành cho người tham gia.
+
+```ts
+// ...omitted content
+import { AddParticipantData, CreatePollData } from './types';
+//... omitted content
+  async addParticipant({
+    pollID,
+    userID,
+    name,
+  }: AddParticipantData): Promise<Poll> {
+    this.logger.log(
+      `Attempting to add a participant with userID/name: ${userID}/${name} to pollID: ${pollID}`,
+    );
+    const key = `polls:${pollID}`;
+    const participantPath = `.participants.${userID}`;
+    try {
+      await this.redisClient.send_command(
+        'JSON.SET',
+        key,
+        participantPath,
+        JSON.stringify(name),
+      );
+      const pollJSON = await this.redisClient.send_command(
+        'JSON.GET',
+        key,
+        '.',
+      );
+      const poll = JSON.parse(pollJSON) as Poll;
+      this.logger.debug(
+        `Current Participants for pollID: ${pollID}:`,
+        poll.participants,
+      );
+      return poll;
+    } catch (e) {
+      this.logger.error(
+        `Failed to add a participant with userID/name: ${userID}/${name} to pollID: ${pollID}`,
+      );
+      throw e;
+    }
+  }
+```
+
+### Gọi Methods từ PollsService
+
+Injected `PollsRepository` với constructor như sau:
+
+```ts polls.service.ts
+import { Injectable, Logger } from '@nestjs/common';
+// ... omitted content
+import { PollsRepository } from './polls.repository';
+// ... omitted content
+@Injectable()
+export class PollsService {
+  private readonly logger = new Logger(PollsService.name);
+  constructor(private readonly pollsRepository: PollsRepository) {}
+  // ... omitted content
+}
+```
+
+Update `createPoll`:
+
+```ts
+ async createPoll(fields: CreatePollFields) {
+    const pollID = createPollID();
+    const userID = createUserID();
+    const createdPoll = await this.pollsRepository.createPoll({
+      ...fields,
+      pollID,
+      userID,
+    });
+    // TODO - create an accessToken based off of pollID and userID
+    return {
+      poll: createdPoll,
+      // accessToken
+    };
+  }
+```
+
+Update `joinPoll`.
+
+```ts
+  async joinPoll(poll: JoinPollFields) {
+    const userID = createUserID();
+    this.logger.debug(
+      `Fetching poll with ID: ${poll.pollID} for user with ID: ${userID}`,
+    );
+    const joinedPoll = await this.pollsRepository.getPoll(poll.pollID);
+    // TODO - create access Token
+    return {
+      poll: joinedPoll,
+      // accessToken: signedString,
+    };
+  }
+```
+
+Update `rejoinPoll`.
+
+```ts
+  async rejoinPoll(fields: RejoinPollFields) {
+    this.logger.debug(
+      `Rejoining poll with ID: ${fields.pollID} for user with ID: ${fields.userID} with name: ${fields.name}`,
+    );
+    const joinedPoll = await this.pollsRepository.addParticipant(fields);
+    return joinedPoll;
+  }
+```
+
+**[⬆ Quay về Mục Lục](#mục-lục)**
+
+<br />
+
+---
+
+<br />
+
+## 06 - Config JWT vào dự án
+
+![Setup JWT](./resources//JWTModule.png)
+
+### Setup JWT
+
+Trong file [modules.config.ts](../server/src/modules.config.ts) nơi mà ta có thể dùng config [Redis Module](../server/src/redis.module.ts).
+
+Đầu tiên, import module và thêm phương thức`registerAsync`. 
+
+```ts
+import { JwtModule } from '@nestjs/jwt';
+// ... omitted content
+export const jwtModule = JwtModule.registerAsync({});
+```
+
+Trong module này sẽ cần quyền truy cập vào `ConfigModule` và `ConfigService`.
+
+```ts
+export const jwtModule = JwtModule.registerAsync({
+  imports: [ConfigModule],
+  inject: [ConfigService],
+});
+```
+Tiếp đó ta thêm function `useFactory` trả về JWT.
+
+```ts
+export const jwtModule = JwtModule.registerAsync({
+  imports: [ConfigModule],
+  useFactory: async (configService: ConfigService) => ({
+    secret: configService.get<string>('JWT_SECRET'),
+    signOptions: {
+      expiresIn: parseInt(configService.get<string>('POLL_DURATION')),
+    },
+  }),
+  inject: [ConfigService],
+});
+```
+
+Ta đã set key bí mật trong file môi trường [.env](../server/.env).
+
+Import và Register cho [polls.module.ts](../server/src/polls/polls.module.ts).
+
+```ts
+import { jwtModule, redisModule } from 'src/modules.config';
+//... omitted content
+@Module({
+  imports: [ConfigModule, redisModule, jwtModule],
+  controllers: [PollsController],
+  providers: [PollsService, PollsRepository],
+})
+export class PollsModule {}
+```
+
+### Sign JWTs trong Polls Service
+
+Thêm `jwtService` vào constructor.
+
+```ts
+import { JwtService } from '@nestjs/jwt';
+//...content omitted
+ constructor(
+    private readonly pollsRepository: PollsRepository,
+    private readonly jwtService: JwtService,
+  ) {}
+```
+
+Phương thức `createPoll`.
+
+```ts
+    this.logger.debug(
+      `Creating token string for pollID: ${createdPoll.id} and userID: ${userID}`,
+    );
+    const signedString = this.jwtService.sign(
+      {
+        pollID: createdPoll.id,
+        name: fields.name,
+      },
+      {
+        subject: userID,
+      },
+    );
+    return {
+      poll: createdPoll,
+      accessToken: signedString,
+    };
+```
+
+Phương thức `joinPoll`.
+
+```ts
+this.logger.debug(
+      `Creating token string for pollID: ${joinedPoll.id} and userID: ${userID}`,
+    );
+    const signedString = this.jwtService.sign(
+      {
+        pollID: joinedPoll.id,
+        name: poll.name,
+      },
+      {
+        subject: userID,
+      },
+    );
+    return {
+      poll: joinedPoll,
+      accessToken: signedString,
+    };
+```
+
+
+**[⬆ Quay về Mục Lục](#mục-lục)**
+
 <br />
 
 ---
