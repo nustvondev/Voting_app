@@ -18,6 +18,7 @@
 * [04 - Thiết lập Redis Module](#04---thiết-lập-redis-module)
 * [05 - Thiết lập Polls Repository](#05---thiết-lập-polls-repository)
 * [06 - Config JWT vào dự án](#06---config-jwt-vào-dự-án)
+* [07 - Setup authorization rejoin method](#07---setup-authorization-rejoin-method)
 
 
 
@@ -1077,6 +1078,145 @@ this.logger.debug(
       accessToken: signedString,
     };
 ```
+
+
+**[⬆ Quay về Mục Lục](#mục-lục)**
+
+<br />
+
+---
+
+<br />
+
+## 07 - Setup authorization rejoin method
+
+Cấu hình ControllerAuthGuard trong thư mục `polls` [controller-auth.guard.ts](../server/src/polls/controller-auth.guard.ts) như sau:
+
+```ts
+import {
+    Injectable,
+    CanActivate,
+    ExecutionContext,
+    ForbiddenException,
+    Logger,
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+
+@Injectable()
+export class ControllerAuthGuard implements CanActivate {
+    private readonly logger = new Logger(ControllerAuthGuard.name);
+    constructor(private readonly jwtService: JwtService) { }
+
+    canActivate(context: ExecutionContext): boolean | Promise<boolean> {
+        const request = context.switchToHttp().getRequest();
+
+        this.logger.debug(`Checking for auth token on request body`, request.body);
+
+        const { accessToken } = request.body;
+
+        try {
+            const payload = this.jwtService.verify(accessToken);
+            // append user and poll to socket
+            request.userID = payload.sub;
+            request.pollID = payload.pollID;
+            request.name = payload.name;
+            return true;
+        } catch {
+            throw new ForbiddenException('Invalid authorization token');
+        }
+    }
+}
+```
+
+Thêm kiểu `Guard` cho trong file [types.ts](../server/src/polls/types.ts).
+
+```ts
+import { Request } from '@nestjs/common';
+//...content omitted
+
+
+// guard types
+type AuthPayload = {
+    userID: string;
+    pollID: string;
+    name: string;
+};
+
+export type RequestWithAuth = Request & AuthPayload;
+```
+
+Thêm `guard` vào controller.
+
+```ts
+import { Req } from '@nestjs/common';
+import { UseGuards } from '@nestjs/common';
+import { Body, Controller, Logger, Post } from '@nestjs/common';
+import { ControllerAuthGuard } from './controller-auth.guard';
+import { CreatePollDto, JoinPollDto } from './dtos';
+import { PollsService } from './polls.service';
+import { RequestWithAuth } from './types';
+
+
+@Controller('polls')
+export class PollsController {
+    constructor(private pollsService: PollsService) { }
+    @Post()
+    async create(@Body() createPollDto: CreatePollDto) {
+        const result = await this.pollsService.createPoll(createPollDto);
+        return result;
+    }
+
+    @Post('/join')
+    async join(@Body() joinPollDto: JoinPollDto) {
+        const result = await this.pollsService.joinPoll(joinPollDto);
+        return result;
+    }
+
+    @UseGuards(ControllerAuthGuard)
+    @Post('/rejoin')
+    async rejoin(@Req() request: RequestWithAuth) {
+        const { userID, pollID, name } = request;
+        const result = await this.pollsService.rejoinPoll({
+            name,
+            pollID,
+            userID,
+        });
+        return result;
+    }
+}
+```
+
+Sau đó tiến hành kiểm thử.
+```sh
+npm run start
+```
+Test kiêm thử bằng Postman.
+
+![Test auth](./resources//auth1.png)
+
+Xem data hiển thị trong Redis.
+
+![View data](./resources//auth2.jpg)
+
+Tiến hành set biến để export.
+
+![Set env for join](./resources//auth3.jpg)
+
+Test `join`.
+
+![Test join](./resources//auth4.jpg)
+
+Export cho phương thức `rejoin`.
+
+![Set env for rejoin](./resources//auth5.jpg)
+
+Test `rejoin`.
+
+![Test rejoin](./resources//auth6.jpg)
+
+Show log.
+
+![Log data](./resources//auth7.jpg)
 
 
 **[⬆ Quay về Mục Lục](#mục-lục)**
