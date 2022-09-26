@@ -1192,7 +1192,7 @@ npm run start
 ```
 Test kiêm thử bằng Postman.
 
-![Test auth](./resources//auth1.png)
+![Test auth](./resources//auth1.jpg)
 
 Xem data hiển thị trong Redis.
 
