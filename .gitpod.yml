@@ -5,5 +5,11 @@
 tasks:
   - init: npm install
     command: npm run start
-
-
+  - command: redis-server
+ports:
+  - port: 3000
+    onOpen: ignore
+  - port: 6379
+    onOpen: ignore
+  - port: 8080
+    onOpen: open-browser
